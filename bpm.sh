@@ -14,15 +14,15 @@ PROFILE_FILE="${HOME}/.bpm/profile"
 
 # Terminal capabilities using tput
 setup_colors() {
-    if [[ -t 1 ]] && [[ "$(tput colors)" -ge 8 ]]; then
-        RED=$(tput setaf 1)
-        GREEN=$(tput setaf 2)
-        YELLOW=$(tput setaf 3)
-        BLUE=$(tput setaf 4)
-        MAGENTA=$(tput setaf 5)
-        CYAN=$(tput setaf 6)
-        BOLD=$(tput bold)
-        NC=$(tput sgr0)
+    if [[ -t 1 ]] && [[ "$(tput colors 2>/dev/null)" -ge 8 ]] 2>/dev/null; then
+        RED=$(tput setaf 1 2>/dev/null)
+        GREEN=$(tput setaf 2 2>/dev/null)
+        YELLOW=$(tput setaf 3 2>/dev/null)
+        BLUE=$(tput setaf 4 2>/dev/null)
+        MAGENTA=$(tput setaf 5 2>/dev/null)
+        CYAN=$(tput setaf 6 2>/dev/null)
+        BOLD=$(tput bold 2>/dev/null)
+        NC=$(tput sgr0 2>/dev/null)
     else
         RED=''; GREEN=''; YELLOW=''; BLUE=''; MAGENTA=''; CYAN=''; BOLD=''; NC=''
     fi
@@ -65,7 +65,7 @@ PLUGIN_DIR=${HOME}/.bpm/plugins
 HOOKS_DIR=${HOME}/.bpm/hooks
 
 # Package settings
-DEFAULT_REPO=https://bpm-repo.example.com
+DEFAULT_REPO=https://zhexhem/bpm
 INSTALL_TIMEOUT=300
 RETRY_COUNT=3
 PARALLEL_INSTALL=false
@@ -84,7 +84,7 @@ EOF
         cat >"${REPO_FILE}" <<'EOF'
 # bpm repositories
 # Format: name url [priority]
-official https://bpm-repo.example.com 10
+official https://github.com/zhexhem/bpm
 community https://community.bpm-repo.example.com 5
 testing https://testing.bpm-repo.example.com 1
 EOF
@@ -143,30 +143,37 @@ progress_bar() {
         return
     fi
 
+    # Prevent division by zero
+    if [[ ${total} -eq 0 ]]; then
+        return
+    fi
+
     local percent=$((current * 100 / total))
     local completed=$((percent * width / 100))
     local remaining=$((width - completed))
 
-    # Save cursor position
-    tput sc
-    
     printf "\r["
     printf "%${completed}s" | tr ' ' '='
     printf "%${remaining}s" | tr ' ' ' '
     printf "] %3d%%" "${percent}"
-    
-    # Restore cursor position
-    tput rc
 }
 
-# Lock management
+# Lock management - FIXED
 acquire_lock() {
     local lock_timeout=30
     local waited=0
 
-    while [[ -f "${LOCK_FILE}" ]] && [[ $(cat "${LOCK_FILE}" 2>/dev/null) -eq $$ ]] 2>/dev/null; do
+    # Check if lock is held by another process
+    while [[ -f "${LOCK_FILE}" ]]; do
+        local lock_pid=$(cat "${LOCK_FILE}" 2>/dev/null)
+        if [[ -z "${lock_pid}" ]] || ! kill -0 "${lock_pid}" 2>/dev/null; then
+            # Lock file exists but process is dead - clean it up
+            rm -f "${LOCK_FILE}"
+            break
+        fi
+        
         if [[ ${waited} -ge ${lock_timeout} ]]; then
-            echo_error "Timeout waiting for lock"
+            echo_error "Timeout waiting for lock (held by PID ${lock_pid})"
             return 1
         fi
         sleep 1
@@ -179,6 +186,16 @@ acquire_lock() {
 
 release_lock() {
     rm -f "${LOCK_FILE}" 2>/dev/null
+}
+
+# Package installation check - ADDED
+is_installed() {
+    local package="$1"
+    if [[ -d "${PACKAGE_DIR}/${package}" ]]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Hook system
@@ -338,13 +355,13 @@ get_package_version() {
 
 # Transaction system
 begin_transaction() {
-    local transaction_id=$(date +%s%N)
+    local transaction_id=$(date +%s%N 2>/dev/null || date +%s)$$
     local transaction_file="${TEMP_DIR}/transaction_${transaction_id}"
 
     echo "BEGIN" >"${transaction_file}"
     echo "ID: ${transaction_id}" >>"${transaction_file}"
     echo "OPERATION: ${OPERATION}" >>"${transaction_file}"
-    echo "TIMESTAMP: $(date -Iseconds)" >>"${transaction_file}"
+    echo "TIMESTAMP: $(date -Iseconds 2>/dev/null || date '+%Y-%m-%d %H:%M:%S')" >>"${transaction_file}"
 
     echo "${transaction_id}"
 }
@@ -356,6 +373,21 @@ commit_transaction() {
     if [[ -f "${transaction_file}" ]]; then
         echo "COMMIT" >>"${transaction_file}"
         log "INFO" "Transaction ${transaction_id} committed"
+        rm -f "${transaction_file}"
+        return 0
+    else
+        echo_error "Transaction ${transaction_id} not found"
+        return 1
+    fi
+}
+
+rollback_transaction() {
+    local transaction_id="$1"
+    local transaction_file="${TEMP_DIR}/transaction_${transaction_id}"
+    
+    if [[ -f "${transaction_file}" ]]; then
+        echo "ROLLBACK" >>"${transaction_file}"
+        log "WARNING" "Transaction ${transaction_id} rolled back"
         rm -f "${transaction_file}"
         return 0
     else
@@ -378,6 +410,7 @@ trap cleanup EXIT
 main() {
     init_dirs
     echo_info "bpm version ${VERSION} initialized"
+    echo_info "Using repository: https://github.com/zhexhem/bpm"
 }
 
 # Run main if script is executed directly
